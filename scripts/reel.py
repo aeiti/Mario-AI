@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def caption(frame, text: str):
     frame = frame.copy()
-    cv2.putText(frame, text, (8, 216), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(frame, text, (9, 217), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)  # shadow
     cv2.putText(frame, text, (8, 216), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
     return frame
 

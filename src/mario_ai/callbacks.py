@@ -1,6 +1,7 @@
-"""Training callbacks: TensorBoard episode stats, an attempt log, and periodic evaluation with video."""
+"""Training callbacks: stats, the attempt log, background evaluation, timing, and live-window controls."""
 
 import csv
+import json
 import multiprocessing as mp
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -11,6 +12,7 @@ from stable_baselines3.common.callbacks import BaseCallback
 
 from mario_ai.config import TrainConfig
 from mario_ai.evaluation import eval_worker_init, evaluate_snapshot
+from mario_ai.viewer import PAUSED, STOPPING
 
 
 class EpisodeStatsCallback(BaseCallback):
@@ -57,9 +59,14 @@ class EvalVideoCallback(BaseCallback):
         self.best = (-1.0, -1.0)  # (clear rate, mean max_x), compared in that order
         self.next_eval = 0
         self.pending = None  # (timesteps, snapshot path, futures) of the running evaluation
+        self.best_file = checkpoint_dir / "best.json"
 
     def _on_training_start(self) -> None:
         self.video_dir.mkdir(parents=True, exist_ok=True)
+        # On resume, remember the best score so far, or the first evaluation
+        # after a restart would replace best.zip even if it did worse.
+        if self.best_file.exists():
+            self.best = tuple(json.loads(self.best_file.read_text())[:2])
         # "spawn" gives each worker a clean interpreter (no inherited emulator
         # or torch state); workers are reused, so the startup cost is paid once.
         self.pool = ProcessPoolExecutor(
@@ -105,6 +112,7 @@ class EvalVideoCallback(BaseCallback):
         if (clear_rate, mean_x) > self.best:
             self.best = (clear_rate, mean_x)
             snapshot.replace(self.checkpoint_dir / "best.zip")
+            self.best_file.write_text(json.dumps([clear_rate, mean_x, steps]))
         else:
             snapshot.unlink()
         if self.verbose:
@@ -178,4 +186,42 @@ class PhaseTimerCallback(BaseCallback):
         self.logger.record("time/rollout_seconds", self.rollout_end - self.rollout_start)
 
     def _on_step(self) -> bool:
+        return True
+
+
+class TrainingControlCallback(BaseCallback):
+    """Obeys the live window's Pause / Save / Stop controls.
+
+    Checked once per vectorised step (a fraction of a millisecond), so a
+    press takes effect almost immediately during play, or within the ~0.3 s
+    network update otherwise. While paused, the emulator processes simply wait
+    for their next action.
+    """
+
+    def __init__(self, live, checkpoint_dir: Path):
+        super().__init__()
+        self.live = live
+        self.checkpoint_dir = checkpoint_dir
+
+    def _save_if_requested(self) -> None:
+        if self.live.take_save_request():
+            path = self.checkpoint_dir / f"manual_{self.num_timesteps}"
+            self.model.save(path)
+            self.live.report(self.num_timesteps, status=f"saved {path.name}.zip")
+            print(f"saved {path}.zip")
+
+    def _on_step(self) -> bool:
+        self._save_if_requested()
+        if self.live.pause_requested():
+            self.live.report(self.num_timesteps, PAUSED)
+            print("paused")
+            while self.live.pause_requested() and not self.live.stop_requested():
+                self._save_if_requested()  # saving while paused works too
+                time.sleep(0.1)
+            print("resumed")
+        if self.live.stop_requested():
+            self.live.report(self.num_timesteps, STOPPING, status="saving final.zip")
+            print("stop requested from the live window")
+            return False  # SB3 ends training; train.py then saves final.zip
+        self.live.report(self.num_timesteps)
         return True

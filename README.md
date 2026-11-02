@@ -35,7 +35,25 @@ There are four ways to watch it improve:
 | Eval videos | `videos/<run>/step_*.mp4` | Every 200k steps, the agent's best behaviour (no exploration) from the same starting point. |
 | Progress reel | `scripts/reel.py <run>` | All the eval videos stitched together, each captioned with its training step. |
 
-TensorBoard's `episode/` and `eval/` sections show distance, clear rate, death rate and each reward component. `time/` shows how long each round spends playing vs. learning. Ctrl-C stops training and saves `checkpoints/<run>/final.zip`. Resume with `--resume <checkpoint>`.
+### Controls
+
+The live window has buttons under the game, and matching keys:
+
+| Button | Key | Does |
+|---|---|---|
+| Pause / Resume | **P** or Space | Freezes training (all emulators wait) until pressed again |
+| Save | **S** | Saves `checkpoints/<run>/manual_<steps>.zip` right away, even while paused |
+| Stop | **Q**, twice within 3 s | Ends training cleanly and saves `final.zip`. The second press is a guard against stray clicks. |
+
+Without `--watch`, use **Ctrl-C** in the terminal to stop (it also saves `final.zip`). Resume any saved model with:
+
+```bash
+uv run scripts/train.py --run yi1 --watch --resume checkpoints/yi1/final.zip
+```
+
+Resuming continues the step count, the attempt log, the TensorBoard graphs and the videos, and remembers the best evaluation so far, so `best.zip` is only replaced by a better one.
+
+TensorBoard's `episode/` and `eval/` sections show distance, clear rate, death rate and each reward component. `time/` shows how long each round spends playing vs. learning.
 
 ### Where the work happens
 

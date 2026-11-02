@@ -21,7 +21,13 @@ import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback
 
-from mario_ai.callbacks import AttemptLogCallback, EpisodeStatsCallback, EvalVideoCallback, PhaseTimerCallback
+from mario_ai.callbacks import (
+    AttemptLogCallback,
+    EpisodeStatsCallback,
+    EvalVideoCallback,
+    PhaseTimerCallback,
+    TrainingControlCallback,
+)
 from mario_ai.config import TrainConfig, linear_schedule
 from mario_ai.evaluation import make_training_env
 from mario_ai.viewer import LiveView
@@ -44,7 +50,7 @@ def main() -> None:
     parser.add_argument("--resume", type=Path, help="checkpoint .zip to continue from")
     parser.add_argument("--device", default=default_device(), help="torch device (default: mps when available)")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--watch", action="store_true", help="show one training env live in a window")
+    parser.add_argument("--watch", action="store_true", help="live window on one env, with Pause/Save/Stop controls")
     args = parser.parse_args()
 
     config = TrainConfig()
@@ -93,6 +99,8 @@ def main() -> None:
         # and each call is n_envs transitions.
         CheckpointCallback(save_freq=max(config.checkpoint_freq // config.n_envs, 1), save_path=str(checkpoint_dir), name_prefix="ppo"),
     ]
+    if live:
+        callbacks.append(TrainingControlCallback(live, checkpoint_dir))
     if config.eval_freq:
         callbacks.append(EvalVideoCallback(config, video_dir=video_dir, checkpoint_dir=checkpoint_dir, verbose=1))
     try:
