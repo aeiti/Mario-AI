@@ -57,19 +57,19 @@ The emulator is perfectly deterministic: the same buttons produce the same game,
 
 ## How PPO learns
 
-Training runs 12 copies of the game in parallel, one per CPU process (stable-retro allows only one emulator per process). The cycle:
+Training runs 16 copies of the game in parallel, one per CPU process (stable-retro allows only one emulator per process). The cycle:
 
-1. **Collect.** Each copy plays 128 steps with the current network, sampling actions from its probabilities. That's 1,536 steps per round.
+1. **Collect.** Each copy plays 128 steps with the current network, sampling actions from its probabilities. That's 2,048 steps per round, taking about 1.6 s.
 2. **Score.** For each step, work out the **advantage**: how much better things went than the value head expected. This uses GAE with γ = 0.99, which counts rewards up to roughly 100 steps (about 7 seconds) into the future.
-3. **Update.** Nudge the network to make high-advantage actions more likely and low-advantage ones less likely. PPO's *clip* (0.1) caps how far the policy can move in one update, which keeps it from wrecking itself on one lucky or unlucky batch. An *entropy bonus* (0.01) keeps it exploring rather than committing too early.
+3. **Update.** On the GPU, about 0.3 s. Nudge the network to make high-advantage actions more likely and low-advantage ones less likely. PPO's *clip* (0.1) caps how far the policy can move in one update, which keeps it from wrecking itself on one lucky or unlucky batch. An *entropy bonus* (0.01) keeps it exploring rather than committing too early.
 4. Repeat for millions of steps.
 
 The hyperparameters in `config.py` are the standard SB3 settings for Atari games, a good starting point for pixel-based platformers. Another project reached a 95–100% clear rate on this level after about 5M steps with similar settings, so that's a reasonable budget expectation.
 
 ## Watching it learn
 
-- The **live window** (`--watch`) shows training env 0. Its actions are *sampled*, so it explores and looks messier than the agent really is.
-- **Eval videos** and `watch.py` use the *deterministic* policy (always the most likely action): what the agent knows, minus the exploration.
+- The **live window** (`--watch`) shows training env 0. Its actions are *sampled*, so it explores and looks messier than the agent really is. The emulator only copies frames into shared memory; a separate viewer process plays them back, so the window keeps moving even while training pauses to update the network.
+- **Eval videos** (made by background worker processes, so training doesn't stop) and `watch.py` use the *deterministic* policy (always the most likely action): what the agent knows, minus the exploration.
 - The **attempt chart** (`progress.py`) is the clearest picture of learning. In the lower panel, dark bands mark where attempts end. Early on they pile up at the first Rex. As the agent learns, the band jumps right, obstacle by obstacle, until the attempts reach the goal tape.
 
 ## Glossary

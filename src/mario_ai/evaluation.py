@@ -1,9 +1,12 @@
-"""Vectorised envs for training, and a single-episode runner for eval and watching."""
+"""Vectorised envs for training, and single-episode runners for eval and watching."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
+import imageio.v2 as imageio
 import numpy as np
+from stable_baselines3 import PPO
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecFrameStack, VecMonitor
 
@@ -14,14 +17,14 @@ from mario_ai.env import FrameRecorder, make_env
 EPISODE_KEYS = ("max_x", "cleared", "died", "stalled")
 
 
-def make_training_env(config: TrainConfig, seed: int = 0, live_view: bool = False) -> VecFrameStack:
+def make_training_env(config: TrainConfig, seed: int = 0, live_feed: str | None = None) -> VecFrameStack:
     """n_envs emulators, each in its own process.
 
     A separate process per emulator is required, not just faster: stable-retro
-    allows only one emulator instance per process. With ``live_view``, env 0
-    shows its play in a window.
+    allows only one emulator instance per process. With ``live_feed`` (a
+    viewer.LiveView's name), env 0 streams its frames to the live window.
     """
-    venv = SubprocVecEnv([lambda rank=i: make_env(config, live_view=live_view and rank == 0) for i in range(config.n_envs)])
+    venv = SubprocVecEnv([lambda rank=i: make_env(config, live_feed=live_feed if rank == 0 else None) for i in range(config.n_envs)])
     venv.seed(seed)  # env i gets seed + i at its first reset
     venv = VecMonitor(venv, info_keywords=EPISODE_KEYS)
     return VecFrameStack(venv, n_stack=config.frame_stack)
@@ -86,3 +89,26 @@ def play_episode(
         steps=steps,
         frames=frames,
     )
+
+
+def eval_worker_init() -> None:
+    # Each evaluation worker plays one game on one CPU core. Torch would
+    # otherwise start a thread per core in every worker and fight the
+    # training emulators for the CPU.
+    import torch
+
+    torch.set_num_threads(1)
+
+
+def evaluate_snapshot(snapshot: Path, config: TrainConfig, seed: int, video: Path | None) -> EpisodeResult:
+    """Runs in an evaluation worker process: load a saved network, play one episode.
+
+    Writes the episode to ``video`` if given, and returns the result without
+    its frames (sending ~170 KB per frame back to the trainer would be waste).
+    """
+    model = PPO.load(snapshot, device="cpu")
+    result = play_episode(model, config, seed=seed, record=video is not None)
+    if video is not None:
+        imageio.mimwrite(video, result.frames, fps=60, macro_block_size=16)
+    result.frames = []
+    return result

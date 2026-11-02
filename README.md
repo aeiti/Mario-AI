@@ -30,12 +30,25 @@ There are four ways to watch it improve:
 
 | What | Where | Shows |
 |---|---|---|
-| Live window | `--watch` | One of the 12 training emulators in real time. The agent is exploring, so expect flailing early on. |
+| Live window | `--watch` | One of the 16 training emulators, played back smoothly by its own process so it never freezes. The agent is exploring, so expect flailing early on. |
 | Attempt chart | `scripts/progress.py` | How far every single attempt got, and *where* attempts end. The dark band in the lower panel is the obstacle it's stuck on; watch it move right. |
-| Eval videos | `videos/<run>/step_*.mp4` | Every 100k steps, the agent's best behaviour (no exploration) from the same starting point. |
+| Eval videos | `videos/<run>/step_*.mp4` | Every 200k steps, the agent's best behaviour (no exploration) from the same starting point. |
 | Progress reel | `scripts/reel.py <run>` | All the eval videos stitched together, each captioned with its training step. |
 
-TensorBoard's `episode/` and `eval/` sections show distance, clear rate, death rate and each reward component. Ctrl-C stops training and saves `checkpoints/<run>/final.zip`. Resume with `--resume <checkpoint>`.
+TensorBoard's `episode/` and `eval/` sections show distance, clear rate, death rate and each reward component. `time/` shows how long each round spends playing vs. learning. Ctrl-C stops training and saves `checkpoints/<run>/final.zip`. Resume with `--resume <checkpoint>`.
+
+### Where the work happens
+
+Training keeps the whole machine busy, in separate processes:
+
+| Process | Does |
+|---|---|
+| 16 emulator workers | play the game in parallel, one per CPU core (stable-retro allows one emulator per process) |
+| trainer (main) | picks actions for all 16 at once, and updates the network on the **Apple GPU (MPS)**, which is about 17× faster than the CPU here |
+| 5 evaluation workers | test a snapshot of the network in the background every 200k steps, one episode each, so training never waits |
+| viewer | draws the live window from shared memory at 60 fps |
+
+That's about 1,000 steps/s on an M4 Max (5M steps in under 1½ hours), up from about 210 with 12 CPU-only workers and evaluation inline.
 
 ## Use a trained agent
 
@@ -63,7 +76,7 @@ src/mario_ai/
   config.py      every tunable number
   evaluation.py  vectorised training envs; play one episode
   callbacks.py   TensorBoard stats, the attempt log, eval videos
-  viewer.py      the live training window
+  viewer.py      the live training window (its own process, fed through shared memory)
 scripts/         import_rom, train, watch, evaluate, progress, reel, explore
 tests/           wrapper unit tests + real-emulator smoke tests
 ```

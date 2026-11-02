@@ -23,7 +23,7 @@ import stable_retro as retro
 from mario_ai import ram
 from mario_ai.actions import Discretizer
 from mario_ai.config import TrainConfig
-from mario_ai.viewer import LiveViewer
+from mario_ai.viewer import FeedFrames, FeedStats, FrameFeed
 from mario_ai.wrappers import GameState, MaxAndSkip, ProgressReward, RandomNoopStart, WarpFrame
 
 
@@ -64,12 +64,12 @@ def make_env(
     state: str | None = None,
     record: bool = False,
     on_frame: Callable[[np.ndarray], None] | None = None,
-    live_view: bool = False,
+    live_feed: str | None = None,
 ) -> gym.Env:
     """One wrapped environment.
 
-    ``on_frame`` is called with every RGB frame (for watch.py); ``live_view``
-    opens a window showing this env as it trains.
+    ``on_frame`` is called with every RGB frame (for watch.py). ``live_feed``
+    is the shared-memory name of a viewer.LiveView window to stream this env to.
     """
     env = retro.make(
         config.game,
@@ -78,6 +78,9 @@ def make_env(
         # Our reward and termination replace the built-in scenario entirely.
         use_restricted_actions=retro.Actions.ALL,
     )
+    feed = FrameFeed(live_feed) if live_feed else None
+    if feed:
+        env = FeedFrames(env, feed)
     if record:
         env = FrameRecorder(env)
     if on_frame:
@@ -86,8 +89,8 @@ def make_env(
     env = MaxAndSkip(env, skip=config.frame_skip)
     env = RandomNoopStart(env, max_noops=config.max_noops)
     env = ProgressReward(env, read_state=read_state, config=config.reward)
-    if live_view:
-        env = LiveViewer(env)
+    if feed:
+        env = FeedStats(env, feed)
     env = WarpFrame(env)
     return env
 

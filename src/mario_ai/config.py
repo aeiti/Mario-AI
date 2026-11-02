@@ -56,14 +56,16 @@ class TrainConfig:
     state: str = "YoshiIsland1"
 
     # Environment pipeline
-    n_envs: int = 8
+    # One emulator process per CPU core. Measured on an M4 Max (16 cores):
+    # 12 -> ~870 steps/s, 16 -> ~1080, 20 -> ~1050, 24 -> ~1060.
+    n_envs: int = 16
     frame_skip: int = 4
     frame_stack: int = 4
     # Up to this many agent steps of standing still after reset; see RandomNoopStart.
     max_noops: int = 30
 
-    # PPO. One rollout is n_envs * n_steps = 1024 transitions, split into
-    # 4 minibatches of 256 and replayed for n_epochs passes.
+    # PPO. One rollout is n_envs * n_steps = 2048 transitions, split into
+    # minibatches of 256 and replayed for n_epochs passes.
     n_steps: int = 128
     batch_size: int = 256
     n_epochs: int = 4
@@ -79,7 +81,7 @@ class TrainConfig:
     # vectorised env, not transitions, so divide by n_envs when passing these:
     # e.g. save_freq=max(checkpoint_freq // n_envs, 1).
     checkpoint_freq: int = 500_000  # transitions between saved models
-    eval_freq: int = 100_000  # transitions between evaluation runs (each makes one video)
+    eval_freq: int = 200_000  # transitions between evaluation runs (each makes one video)
     n_eval_episodes: int = 5
 
     reward: RewardConfig = field(default_factory=RewardConfig)

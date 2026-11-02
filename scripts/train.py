@@ -16,14 +16,23 @@ import dataclasses
 import json
 from pathlib import Path
 
+import torch
+
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CallbackList, CheckpointCallback
 
-from mario_ai.callbacks import AttemptLogCallback, EpisodeStatsCallback, EvalVideoCallback
+from mario_ai.callbacks import AttemptLogCallback, EpisodeStatsCallback, EvalVideoCallback, PhaseTimerCallback
 from mario_ai.config import TrainConfig, linear_schedule
 from mario_ai.evaluation import make_training_env
+from mario_ai.viewer import LiveView
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def default_device() -> str:
+    # The network update is ~17x faster on the Apple GPU than the CPU (0.28 s
+    # vs 4.8 s per round here), and the emulators sit idle while it runs.
+    return "mps" if torch.backends.mps.is_available() else "cpu"
 
 
 def main() -> None:
@@ -31,9 +40,9 @@ def main() -> None:
     parser.add_argument("--run", required=True, help="name for this run's logs, checkpoints and videos")
     parser.add_argument("--timesteps", type=int, help="override TrainConfig.total_timesteps")
     parser.add_argument("--n-envs", type=int, help="override TrainConfig.n_envs")
-    parser.add_argument("--eval-freq", type=int, help="override TrainConfig.eval_freq")
+    parser.add_argument("--eval-freq", type=int, help="override TrainConfig.eval_freq (0 disables evaluation)")
     parser.add_argument("--resume", type=Path, help="checkpoint .zip to continue from")
-    parser.add_argument("--device", default="cpu", help="torch device: cpu or mps")
+    parser.add_argument("--device", default=default_device(), help="torch device (default: mps when available)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--watch", action="store_true", help="show one training env live in a window")
     args = parser.parse_args()
@@ -43,7 +52,7 @@ def main() -> None:
         config.total_timesteps = args.timesteps
     if args.n_envs:
         config.n_envs = args.n_envs
-    if args.eval_freq:
+    if args.eval_freq is not None:
         config.eval_freq = args.eval_freq
 
     log_dir = ROOT / "runs"
@@ -52,7 +61,8 @@ def main() -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     (checkpoint_dir / "config.json").write_text(json.dumps(dataclasses.asdict(config), indent=2))
 
-    env = make_training_env(config, seed=args.seed, live_view=args.watch)
+    live = LiveView() if args.watch else None
+    env = make_training_env(config, seed=args.seed, live_feed=live.name if live else None)
 
     if args.resume:
         model = PPO.load(args.resume, env=env, device=args.device, tensorboard_log=str(log_dir))
@@ -75,20 +85,20 @@ def main() -> None:
             verbose=1,
         )
 
-    callbacks = CallbackList(
-        [
-            EpisodeStatsCallback(),
-            AttemptLogCallback(checkpoint_dir / "attempts.csv"),
-            # SB3 counts checkpoint frequency in calls to the vectorised env,
-            # and each call is n_envs transitions.
-            CheckpointCallback(save_freq=max(config.checkpoint_freq // config.n_envs, 1), save_path=str(checkpoint_dir), name_prefix="ppo"),
-            EvalVideoCallback(config, video_dir=video_dir, checkpoint_dir=checkpoint_dir, verbose=1),
-        ]
-    )
+    callbacks = [
+        PhaseTimerCallback(),
+        EpisodeStatsCallback(),
+        AttemptLogCallback(checkpoint_dir / "attempts.csv"),
+        # SB3 counts checkpoint frequency in calls to the vectorised env,
+        # and each call is n_envs transitions.
+        CheckpointCallback(save_freq=max(config.checkpoint_freq // config.n_envs, 1), save_path=str(checkpoint_dir), name_prefix="ppo"),
+    ]
+    if config.eval_freq:
+        callbacks.append(EvalVideoCallback(config, video_dir=video_dir, checkpoint_dir=checkpoint_dir, verbose=1))
     try:
         model.learn(
             total_timesteps=config.total_timesteps,
-            callback=callbacks,
+            callback=CallbackList(callbacks),
             tb_log_name=args.run,
             reset_num_timesteps=not args.resume,
         )
@@ -96,6 +106,8 @@ def main() -> None:
         # Ctrl-C still leaves a usable model behind.
         model.save(checkpoint_dir / "final")
         env.close()
+        if live:
+            live.close()
 
 
 if __name__ == "__main__":
