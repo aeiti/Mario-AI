@@ -58,3 +58,41 @@ def test_no_key_does_nothing():
     controls, shared = make_controls()
     controls.key(-1)  # what pollKey returns when nothing was pressed
     assert shared == {"paused": 0, "save_requests": 0, "stop_requested": 0}
+
+
+def test_feed_records_whole_attempts_into_free_clips_only():
+    import numpy as np
+    from multiprocessing import shared_memory
+    from mario_ai.viewer import CLIP_FRAMES, FREE, PLAYING, READY, RECORDING, SIZE, FrameFeed, Shared
+
+    shm = shared_memory.SharedMemory(create=True, size=SIZE)
+    try:
+        shared = Shared(shm.buf)
+        shared["clip0_state"] = shared["clip1_state"] = FREE
+        feed = FrameFeed(shm.name)
+        frame = lambda v: np.full((viewer.HEIGHT, viewer.WIDTH, 3), v, dtype=np.uint8)
+
+        def attempt(value, frames):
+            feed.new_attempt()
+            for _ in range(frames):
+                feed.push(frame(value))
+
+        attempt(1, 3)  # recorded into clip 0
+        attempt(2, 5)  # clip 0 handed over; recorded into clip 1
+        assert shared["clip0_state"] == READY and shared["clip0_length"] == 3
+        attempt(3, 4)  # clip 1 handed over; no clip free, so attempt 3 is skipped
+        assert shared["clip1_state"] == READY and shared["clip1_length"] == 5
+        assert feed.clip is None
+
+        shared["clip0_state"] = PLAYING  # the viewer plays clip 0, then frees it
+        shared["clip0_state"] = FREE
+        attempt(4, 2)  # recorded into clip 0, replacing attempt 1
+        assert shared["clip0_state"] == RECORDING
+        assert shared.frames[0, 0, 0, 0] == 4 and shared.frames[CLIP_FRAMES, 0, 0, 0] == 2
+
+        feed.new_attempt()
+        assert shared["clip0_length"] == 2
+        del shared, feed
+    finally:
+        shm.close()
+        shm.unlink()

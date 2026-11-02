@@ -68,7 +68,7 @@ The hyperparameters in `config.py` are the standard SB3 settings for Atari games
 
 ## Watching it learn
 
-- The **live window** (`--watch`) shows training env 0. Its actions are *sampled*, so it explores and looks messier than the agent really is. The emulator only copies frames into shared memory; a separate viewer process plays them back, so the window keeps moving even while training pauses to update the network.
+- The **live window** (`--watch`) shows training env 0. Its actions are *sampled*, so it explores and looks messier than the agent really is. The emulator records one complete attempt at a time into shared memory, and a separate viewer process plays it back at real speed, so the window keeps moving even while training pauses to update the network. Training runs faster than real time, so the attempts in between are skipped.
 - **Eval videos** (made by background worker processes, so training doesn't stop) and `watch.py` use the *deterministic* policy (always the most likely action): what the agent knows, minus the exploration.
 - The **attempt chart** (`progress.py`) is the clearest picture of learning. In the lower panel, dark bands mark where attempts end. Early on they pile up at the first Rex. As the agent learns, the band jumps right, obstacle by obstacle, until the attempts reach the goal tape.
 

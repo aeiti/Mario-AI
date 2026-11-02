@@ -30,7 +30,7 @@ There are four ways to watch it improve:
 
 | What | Where | Shows |
 |---|---|---|
-| Live window | `--watch` | One of the 16 training emulators, played back smoothly by its own process so it never freezes. The agent is exploring, so expect flailing early on. |
+| Live window | `--watch` | Whole attempts from one of the 16 training emulators, at real speed. That emulator plays about 5× faster than real time, so the window skips the attempts in between; the attempt number shows how many. The agent is exploring, so expect flailing early on. |
 | Attempt chart | `scripts/progress.py` | How far every single attempt got, and *where* attempts end. The dark band in the lower panel is the obstacle it's stuck on; watch it move right. |
 | Eval videos | `videos/<run>/step_*.mp4` | Every 200k steps, the agent's best behaviour (no exploration) from the same starting point. |
 | Progress reel | `scripts/reel.py <run>` | All the eval videos stitched together, each captioned with its training step. |

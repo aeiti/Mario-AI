@@ -8,9 +8,15 @@ deterministic policy instead, i.e. what it would do if it stopped exploring.)
 Why a separate process: training stops all the emulators every few seconds
 while PPO updates the network, and for longer during evaluations. A window
 drawn by an emulator process would freeze then, and macOS would mark it as
-not responding. So the emulator only copies frames into a shared-memory ring
-buffer (fast, never blocks), and a viewer process plays them back at a steady
-60 fps, keeping the window responsive even while training is paused.
+not responding. So the emulator only copies frames into shared memory (fast,
+never blocks), and a viewer process plays them back at a steady 60 fps,
+keeping the window responsive even while training is paused.
+
+Emulator 0 plays about 5x faster than real time, so the window can't show
+every attempt. It shows whole attempts at real speed instead, and skips the
+ones that happen while it's busy. Shared memory holds two clips: while the
+viewer plays one, the emulator records its next complete attempt into the
+other, so the next clip is ready the moment the current one ends.
 
 The same shared memory carries the controls. The window's buttons and keys
 set flags the trainer checks every step, and the trainer writes back its
@@ -34,13 +40,20 @@ import numpy as np
 WINDOW = "Mario-AI: live training (env 0)"
 HEIGHT, WIDTH = 224, 256
 SCALE = 3
-SLOTS = 600  # 10 s of frames at 60 fps (~100 MB)
+CLIPS = 2
+CLIP_FRAMES = 3000  # 50 s at 60 fps; a full clear is ~40 s. 2 clips is ~1 GB of RAM
+SLOTS = CLIPS * CLIP_FRAMES
 TEXT_BYTES = 120  # overlay text stored with each frame, so stats stay in sync
 FRAME_BYTES = HEIGHT * WIDTH * 3
 
+# Each clip moves FREE -> RECORDING (emulator) -> READY -> PLAYING (viewer) -> FREE.
+# Each side only moves a clip out of the states it owns, so they never race.
+FREE, RECORDING, READY, PLAYING = 0, 1, 2, 3
+
 # Header: a few uint64 fields, then a status message from the trainer.
 FIELDS = (
-    "frames_written",  # emulator 0 -> viewer
+    *(f"clip{i}_state" for i in range(CLIPS)),   # see the states above
+    *(f"clip{i}_length" for i in range(CLIPS)),  # frames recorded, set when READY
     "paused",          # viewer -> trainer: 1 while the user wants a pause
     "save_requests",   # viewer -> trainer: incremented once per Save press
     "stop_requested",  # viewer -> trainer: 1 once the user confirms Stop
@@ -126,12 +139,19 @@ class LiveView:
 
 
 class FrameFeed:
-    """The writing end, living in the emulator process. Never blocks."""
+    """The writing end, living in the emulator process. Never blocks.
+
+    At the start of each attempt it claims a free clip, if there is one, and
+    records that whole attempt into it. Attempts that start while both clips
+    are taken simply aren't recorded.
+    """
 
     def __init__(self, name: str):
         self.name = name
         self.text = ""
         self._shm = None
+        self.clip = None  # index of the clip being recorded
+        self.length = 0
 
     def _open(self):
         # Child processes share the trainer's resource tracker, so attaching
@@ -139,16 +159,29 @@ class FrameFeed:
         self._shm = shared_memory.SharedMemory(name=self.name)
         self.shared = Shared(self._shm.buf)
 
-    def push(self, frame: np.ndarray) -> None:
+    def new_attempt(self) -> None:
+        """Hand the finished attempt to the viewer, and start recording the next one if a clip is free."""
         if self._shm is None:
             self._open()
-        n = self.shared["frames_written"]
-        slot = n % SLOTS
+        if self.clip is not None:
+            self.shared[f"clip{self.clip}_length"] = self.length
+            self.shared[f"clip{self.clip}_state"] = READY  # publish only after the length is set
+            self.clip = None
+        for i in range(CLIPS):
+            if self.shared[f"clip{i}_state"] == FREE:
+                self.shared[f"clip{i}_state"] = RECORDING
+                self.clip, self.length = i, 0
+                break
+
+    def push(self, frame: np.ndarray) -> None:
+        if self.clip is None or self.length == CLIP_FRAMES:  # not recording, or the clip is full
+            return
+        slot = self.clip * CLIP_FRAMES + self.length
         self.shared.frames[slot] = frame
         encoded = self.text.encode()[:TEXT_BYTES]
         self.shared.texts[slot] = 0
         self.shared.texts[slot, : len(encoded)] = np.frombuffer(encoded, dtype=np.uint8)
-        self.shared["frames_written"] = n + 1  # publish only after the slot is fully written
+        self.length += 1
 
 
 class FeedFrames(gym.Wrapper):
@@ -157,6 +190,10 @@ class FeedFrames(gym.Wrapper):
     def __init__(self, env: gym.Env, feed: FrameFeed):
         super().__init__(env)
         self.feed = feed
+
+    def reset(self, **kwargs):
+        self.feed.new_attempt()
+        return self.env.reset(**kwargs)
 
     def step(self, action):
         obs, *rest = self.env.step(action)
@@ -203,6 +240,7 @@ BUTTONS = {  # name: (x, width); all buttons share the bar's y range
     "stop": (320, 150),
 }
 CONFIRM_SECONDS = 3
+HOLD_TICKS = 45  # show each attempt's final frame for 0.75 s
 
 
 def button_at(x: int, y: int) -> str | None:
@@ -291,26 +329,21 @@ class Controls:
         }
 
 
-def status_lines(shared: Shared, speed: int = 1) -> list[str]:
+def status_lines(shared: Shared) -> list[str]:
     state = shared["trainer_state"]
     word = {RUNNING: "running", PAUSED: "PAUSED", STOPPING: "stopping"}.get(state, "")
     if shared["paused"] and state == RUNNING:
         word = "pausing..."
-    playback = f"   playback {speed}x" if speed > 1 else ""
-    return [f"{word}   {shared['timesteps']:,} steps{playback}", shared.status]
+    return [f"{word}   {shared['timesteps']:,} steps", shared.status]
 
 
 def _viewer_main(name: str) -> None:
-    """The viewer process: play frames from the ring buffer at a steady pace.
+    """The viewer process: play recorded attempts one after another, at real speed.
 
-    Emulator 0 produces frames in bursts (about a second of fast play, then a
-    pause while PPO updates), and on average several times faster than real
-    time: about 350 fps at 1,400 steps/s. Showing them at 60 fps would fall
-    further and further behind. So we fast-forward: each tick advances by
-    enough frames to keep the backlog around half a second, which plays every
-    attempt from start to finish, sped up to match training. We only jump
-    ahead if the backlog is about to be overwritten, and show the last frame
-    dimmed while the buffer is empty.
+    Each clip is one complete attempt. After its last frame we hold the
+    outcome on screen for a moment, free the clip for the emulator to record
+    into again, and start the other clip if it's ready. While neither is
+    ready, the last frame stays up, dimmed.
     """
     shm = shared_memory.SharedMemory(name=name)
     shared = Shared(shm.buf)
@@ -318,33 +351,42 @@ def _viewer_main(name: str) -> None:
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE)
     cv2.setMouseCallback(WINDOW, controls.mouse)
 
-    read = 0
+    playing = None  # clip index
+    pos = length = 0
+    hold = 0  # ticks left showing a clip's final frame
     last = np.zeros((HEIGHT * SCALE, WIDTH * SCALE, 3), dtype=np.uint8)
-    overlay = ["waiting for the first frames..."]
+    overlay = ["waiting for the first attempt..."]
     tick = 1 / 60
-    speed = 1
     next_tick = time.perf_counter()
     try:
         while True:
-            written = shared["frames_written"]
-            backlog = written - read
-            if backlog > SLOTS - 120:  # about to be overwritten: jump ahead
-                read = written - 60
-                backlog = 60
-            if backlog > 0:
-                # Advance 1 frame per tick when keeping up, more when behind.
-                speed = max(1, backlog // 30)
-                read += speed
-                slot = (read - 1) % SLOTS
+            if playing is None:
+                ready = [i for i in range(CLIPS) if shared[f"clip{i}_state"] == READY]
+                if ready:
+                    playing, pos, hold = ready[0], 0, HOLD_TICKS
+                    length = shared[f"clip{playing}_length"]
+                    shared[f"clip{playing}_state"] = PLAYING
+            if playing is not None and pos < length:
+                slot = playing * CLIP_FRAMES + pos
                 img = cv2.resize(shared.frames[slot], None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_NEAREST)
                 last = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
                 overlay = bytes(shared.texts[slot]).rstrip(b"\0").decode(errors="ignore").split("|")
+                pos += 1
                 game = last
+            elif playing is not None:  # the clip is over: hold its outcome, then free it
+                game = last
+                hold -= 1
+                if hold <= 0:
+                    shared[f"clip{playing}_state"] = FREE
+                    playing = None
             else:
-                game = (last * 0.5).astype(np.uint8)  # dim the last frame while nothing new arrives
-                note = "PAUSED" if shared["trainer_state"] == PAUSED else "(training is updating the network...)"
+                game = (last * 0.5).astype(np.uint8)
+                if shared["trainer_state"] == PAUSED:
+                    note = "PAUSED"
+                else:
+                    note = "(waiting for the next attempt...)"
                 overlay = overlay[:2] + [note]
-            cv2.imshow(WINDOW, compose(game, overlay[:3], controls.labels(), controls.hover, status_lines(shared, speed)))
+            cv2.imshow(WINDOW, compose(game, overlay[:3], controls.labels(), controls.hover, status_lines(shared)))
             controls.key(cv2.pollKey())
             next_tick += tick
             delay = next_tick - time.perf_counter()
