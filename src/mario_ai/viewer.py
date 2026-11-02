@@ -291,22 +291,26 @@ class Controls:
         }
 
 
-def status_lines(shared: Shared) -> list[str]:
+def status_lines(shared: Shared, speed: int = 1) -> list[str]:
     state = shared["trainer_state"]
     word = {RUNNING: "running", PAUSED: "PAUSED", STOPPING: "stopping"}.get(state, "")
     if shared["paused"] and state == RUNNING:
         word = "pausing..."
-    return [f"{word}   {shared['timesteps']:,} steps", shared.status]
+    playback = f"   playback {speed}x" if speed > 1 else ""
+    return [f"{word}   {shared['timesteps']:,} steps{playback}", shared.status]
 
 
 def _viewer_main(name: str) -> None:
     """The viewer process: play frames from the ring buffer at a steady pace.
 
-    Emulator 0 produces frames in bursts (a few seconds of fast play, then a
-    pause while PPO updates), slightly faster than 60 fps on average. So we
-    play from a buffer: normally at 60 fps, a little faster when the backlog
-    grows, skipping ahead if it ever gets too far behind, and showing the last
-    frame dimmed while the buffer is empty.
+    Emulator 0 produces frames in bursts (about a second of fast play, then a
+    pause while PPO updates), and on average several times faster than real
+    time: about 350 fps at 1,400 steps/s. Showing them at 60 fps would fall
+    further and further behind. So we fast-forward: each tick advances by
+    enough frames to keep the backlog around half a second, which plays every
+    attempt from start to finish, sped up to match training. We only jump
+    ahead if the backlog is about to be overwritten, and show the last frame
+    dimmed while the buffer is empty.
     """
     shm = shared_memory.SharedMemory(name=name)
     shared = Shared(shm.buf)
@@ -318,6 +322,7 @@ def _viewer_main(name: str) -> None:
     last = np.zeros((HEIGHT * SCALE, WIDTH * SCALE, 3), dtype=np.uint8)
     overlay = ["waiting for the first frames..."]
     tick = 1 / 60
+    speed = 1
     next_tick = time.perf_counter()
     try:
         while True:
@@ -327,8 +332,9 @@ def _viewer_main(name: str) -> None:
                 read = written - 60
                 backlog = 60
             if backlog > 0:
-                # 1 frame per tick normally; up to 3 when ~10 s behind.
-                read += 1 + min(backlog // 300, 2)
+                # Advance 1 frame per tick when keeping up, more when behind.
+                speed = max(1, backlog // 30)
+                read += speed
                 slot = (read - 1) % SLOTS
                 img = cv2.resize(shared.frames[slot], None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_NEAREST)
                 last = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
@@ -338,7 +344,7 @@ def _viewer_main(name: str) -> None:
                 game = (last * 0.5).astype(np.uint8)  # dim the last frame while nothing new arrives
                 note = "PAUSED" if shared["trainer_state"] == PAUSED else "(training is updating the network...)"
                 overlay = overlay[:2] + [note]
-            cv2.imshow(WINDOW, compose(game, overlay[:3], controls.labels(), controls.hover, status_lines(shared)))
+            cv2.imshow(WINDOW, compose(game, overlay[:3], controls.labels(), controls.hover, status_lines(shared, speed)))
             controls.key(cv2.pollKey())
             next_tick += tick
             delay = next_tick - time.perf_counter()
