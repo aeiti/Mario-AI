@@ -360,13 +360,19 @@ def _viewer_main(name: str) -> None:
     next_tick = time.perf_counter()
     try:
         while True:
+            shown = None  # overlay override for this tick
             if playing is None:
                 ready = [i for i in range(CLIPS) if shared[f"clip{i}_state"] == READY]
                 if ready:
                     playing, pos, hold = ready[0], 0, HOLD_TICKS
                     length = shared[f"clip{playing}_length"]
                     shared[f"clip{playing}_state"] = PLAYING
-            if playing is not None and pos < length:
+            if shared["paused"]:
+                # Freeze playback too. The clip runs behind training, so
+                # without this the game would keep moving after a pause.
+                game = (last * 0.5).astype(np.uint8)
+                shown = overlay[:2] + ["PAUSED"]
+            elif playing is not None and pos < length:
                 slot = playing * CLIP_FRAMES + pos
                 img = cv2.resize(shared.frames[slot], None, fx=SCALE, fy=SCALE, interpolation=cv2.INTER_NEAREST)
                 last = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
@@ -381,12 +387,8 @@ def _viewer_main(name: str) -> None:
                     playing = None
             else:
                 game = (last * 0.5).astype(np.uint8)
-                if shared["trainer_state"] == PAUSED:
-                    note = "PAUSED"
-                else:
-                    note = "(waiting for the next attempt...)"
-                overlay = overlay[:2] + [note]
-            cv2.imshow(WINDOW, compose(game, overlay[:3], controls.labels(), controls.hover, status_lines(shared)))
+                shown = overlay[:2] + ["(waiting for the next attempt...)"]
+            cv2.imshow(WINDOW, compose(game, (shown or overlay)[:3], controls.labels(), controls.hover, status_lines(shared)))
             controls.key(cv2.pollKey())
             next_tick += tick
             delay = next_tick - time.perf_counter()
