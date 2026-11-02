@@ -1,0 +1,16 @@
+# ROMs are never committed
+*.smc
+*.sfc
+roms/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Training outputs
+runs/
+checkpoints/
+videos/
+frames/
